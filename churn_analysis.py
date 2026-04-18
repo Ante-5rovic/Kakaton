@@ -299,8 +299,7 @@ churn['CHURN_RISK'] = (
     (churn['days_since_txn'].clip(0, 90) / 90) * 20 +
     churn['bal_drop']                          * 20 +
     churn['vol_drop']                          * 15 +
-    (churn['prigovori_6m'].clip(0, 3) / 3)     * 10 +
-    (1 - churn['digital_ratio'])               * 10
+    (churn['prigovori_6m'].clip(0, 3) / 3)     * 20
 ).clip(0, 100)
 
 # Binding faktor — klijenti s kreditom ne mogu zaista otići (cap 45)
@@ -454,63 +453,6 @@ for score, cnt in job_dist.items():
     print(f"     {score:>3} bod — {cnt:>5} klijenata")
 
 
-# ════════════════════════════════════════════════════════════
-# 6. SIMULACIJA APP ENGAGEMENT
-# ════════════════════════════════════════════════════════════
-# Pretpostavljamo da banka bilježi:
-#   - broj app loginova u zadnjih 30 dana
-#   - push open rate (% push obavijesti koje je klijent otvorio)
-#   - dana od zadnjeg logina
-#
-# Simuliramo konzistentno s churn rizikom:
-#   visoki churn risk → opadajući engagement
-# ════════════════════════════════════════════════════════════
-
-print("\n[6/9] Simulacija App Engagement (sintetički podatak)...")
-
-np.random.seed(42)
-
-has_digital_ids = set(clv[clv['has_digitalni'] == 1]['IDENTIFIKATOR_KLIJENTA'])
-churn_map = churn.set_index('IDENTIFIKATOR_KLIJENTA')['CHURN_RISK']
-
-app_rows = []
-for _, row in klijenti.iterrows():
-    kid = row['IDENTIFIKATOR_KLIJENTA']
-    dob = row.get('DOB', 40)
-    ima_digital = 1 if kid in has_digital_ids else 0
-    risk = churn_map.get(kid, 50) / 100   # 0-1
-
-    base_logins = 9 if ima_digital else 2
-    if dob > 60:
-        base_logins = max(1, base_logins - 3)
-
-    decay = risk * 0.85
-    logins = max(0, int(np.random.poisson(base_logins * (1 - decay))))
-    push_open = float(np.clip(np.random.beta(max(0.1, 2*(1-decay)), max(0.1, 3+decay*6)), 0, 1))
-    days_no_login = min(int(np.random.exponential(4 + decay * 45)), 180)
-
-    app_rows.append({
-        'IDENTIFIKATOR_KLIJENTA': kid,
-        'app_logins_30d':         logins,
-        'push_open_rate':         round(push_open, 3),
-        'days_since_app_login':   days_no_login,
-    })
-
-app_df = pd.DataFrame(app_rows)
-
-# Ugradi u churn score (app signal = ±15% utjecaj)
-churn = churn.merge(app_df, on='IDENTIFIKATOR_KLIJENTA', how='left')
-cr_app = (1 - (churn['app_logins_30d'].clip(0, 10) / 10)) * 15
-churn['CHURN_RISK'] = (churn['CHURN_RISK'] * 0.85 + cr_app * 1.0).clip(0, 100)
-# Ponovi binding cap
-churn['CHURN_RISK'] = np.where(
-    churn['ima_kredit'] == 1,
-    churn['CHURN_RISK'].clip(0, 45),
-    churn['CHURN_RISK'])
-
-print(f"  ✓ App engagement simuliran za {len(app_df):,} klijenata")
-print(f"  ✓ Prosječni logins/mj: {app_df['app_logins_30d'].mean():.1f}  "
-      f"  Prosječni push open rate: {app_df['push_open_rate'].mean():.1%}")
 
 
 # ════════════════════════════════════════════════════════════
@@ -528,8 +470,7 @@ final = (final
                 'avg_monthly_vol', 'avg_balance_90d']],
            on='IDENTIFIKATOR_KLIJENTA', how='left')
     .merge(churn[['IDENTIFIKATOR_KLIJENTA', 'CHURN_RISK', 'days_since_txn',
-                  'app_logins_30d', 'push_open_rate', 'prigovori_6m',
-                  'freq_drop', 'bal_drop', 'vol_drop', 'digital_ratio', 'ima_kredit']],
+                  'prigovori_6m', 'freq_drop', 'bal_drop', 'vol_drop', 'ima_kredit']],
            on='IDENTIFIKATOR_KLIJENTA', how='left')
     .merge(potential[['IDENTIFIKATOR_KLIJENTA', 'FUTURE_POTENTIAL',
                       'age_score', 'job_score', 'crossell_score']],
@@ -587,14 +528,14 @@ final['SEGMENT'] = final.apply(segmentiraj_3d, axis=1)
 
 # Preporučene akcije po segmentu
 AKCIJE = {
-    'SPASI PRIORITET': '🚨  Hitan osobni poziv + premium ponuda (hipoteka/invest. fond)',
-    'SPASI':           '📞  Osobni poziv savjetnika + konkretna retencijska ponuda',
-    'INVESTIRAJ':      '📱  Personalizirana digitalna ponuda + relationship building',
-    'UPOZORI':         '📧  Automatska jeftina ponuda, niska investicija',
-    'RAZVIJAJ PREMIUM':'💼  Proaktivni cross-sell: kredit, hipoteka, investicije',
-    'ODRŽAVAJ':        '🎁  Loyalty program / proaktivni check-in',
-    'RAZVIJAJ':        '📧  Nurture kampanja / onboarding novih proizvoda',
-    'PRATI':           '👁️   Automatizirani monitoring, bez aktivne akcije',
+    'SPASI PRIORITET': '🚨  Potrebna hitna intervencija bankara',
+    'SPASI':           '📞  Potrebna intervencija bankara',
+    'INVESTIRAJ':      '📱  Automatska nagrada putem aplikacije',
+    'UPOZORI':         '📱  Automatska nagrada putem aplikacije',
+    'RAZVIJAJ PREMIUM':'📱  Automatska nagrada putem aplikacije',
+    'ODRŽAVAJ':        '📱  Loyalty nagrada putem aplikacije',
+    'RAZVIJAJ':        '📱  Automatska nagrada putem aplikacije',
+    'PRATI':           '📱  Automatska nagrada putem aplikacije',
 }
 BUDGET = {
     'SPASI PRIORITET': 'Neograničen',
@@ -819,7 +760,7 @@ output_cols = [
     'CLV_SCORE', 'CHURN_RISK', 'FUTURE_POTENTIAL', 'PRIORITY_SCORE',
     'SEGMENT', 'PREPORUCENA_AKCIJA',
     'aktivnih_proizvoda', 'has_kredit', 'tenure_years',
-    'days_since_txn', 'app_logins_30d', 'push_open_rate', 'prigovori_6m',
+    'days_since_txn', 'prigovori_6m',
 ]
 out_csv = DATA_PATH.replace('OneDrive_2026-04-16\\', '') + 'churn_results.csv'
 (final[output_cols]
@@ -830,6 +771,808 @@ print(f"\n  ✓ Rezultati: churn_results.csv  ({len(final):,} klijenata)")
 print("\n" + "=" * 62)
 print("  ZAVRŠENO!")
 print("=" * 62)
+
+
+# ════════════════════════════════════════════════════════════
+# ANALIZA POTROŠNJE — gdje klijenti troše novac
+# ════════════════════════════════════════════════════════════
+
+print("\n\n" + "═" * 70)
+print("  ANALIZA POTROŠNJE — kategorije i partner mapa")
+print("═" * 70)
+
+# Mapiranje bankarskih MCC kategorija → partneri i tip ponude
+PARTNER_MAPA = {
+    # Hrana i dostava
+    'DJELATNOSTI RESTORANA':                      ('Hrana & Restorani',  'Wolt / Bolt Food — 10% cashback na dostavu'),
+    'USLUGE PREHRANE':                            ('Hrana & Restorani',  'Wolt / Bolt Food — 10% cashback na dostavu'),
+    'PRIPREMANJE I USLUŽIVANJE HRANE I PIĆA':     ('Hrana & Restorani',  'Wolt / Bolt Food — 10% cashback na dostavu'),
+
+    # Supermarketi i trgovine
+    'TRGOVINA NA MALO':                           ('Supermarketi',       'Konzum / Spar — 5% cashback na tjedno pakiranje'),
+    'TRGOVINA NA MALO PRETEŽNO PREHRAMBENIM':     ('Supermarketi',       'Konzum / Spar — 5% cashback na tjedno pakiranje'),
+    'NESPECIJALIZIRANA TRGOVINA NA MALO':         ('Supermarketi',       'Konzum / Spar — 5% cashback na tjedno pakiranje'),
+
+    # Gorivo i automobili
+    'TRGOVINA NA MALO MOTORNIM GORIVIMA':         ('Gorivo',             'INA kartica — 0,10€ popust po litri goriva'),
+    'POPRAVAK MOTORNIH VOZILA I MOTOCIKALA':      ('Automobili',         'Auto servis partner — 15% popust na servis'),
+
+    # Putovanja i turizam
+    'DJELATNOSTI PUTNIČKIH AGENCIJA':             ('Putovanja',          'Uniline / Valamar — extra 8% popust na aranžman'),
+    'DJELATNOSTI SMJEŠTAJA':                      ('Putovanja',          'Booking.com partner — 5% cashback na rezervacije'),
+    'ZRAČNI PRIJEVOZ':                            ('Putovanja',          'Croatia Airlines Miles — dvostruki bodovi'),
+
+    # Zdravlje i ljekarne
+    'DJELATNOSTI ZDRAVSTVENE ZAŠTITE':            ('Zdravlje',           'dm / Bipa — 10% popust na dermokozmetiku'),
+    'DJELATNOSTI BOLNICA':                        ('Zdravlje',           'Medicinsko osiguranje partner — snižena premija'),
+    'DJELATNOSTI ZDRAVSTVENE ZAŠTITE I SOCIJALNE SKRBI': ('Zdravlje',    'dm / Bipa — 10% popust na dermokozmetiku'),
+
+    # Sport i rekreacija
+    'SPORTSKE AKTIVNOSTI I ZABAVA':               ('Sport & Fitness',    'MultiSport kartica — 20% popust na godišnju'),
+    'DJELATNOSTI FITNES CENTARA':                 ('Sport & Fitness',    'MultiSport kartica — 20% popust na godišnju'),
+
+    # Odjeća i moda
+    'TRGOVINA NA MALO ODJEĆOM':                  ('Moda',               'Zara / H&M partner — 10% na online kupnju'),
+    'TRGOVINA NA MALO OBUĆOM':                    ('Moda',               'Zara / H&M partner — 10% na online kupnju'),
+
+    # Elektronika i tehnologija
+    'TRGOVINA NA MALO RAČUNALNOM OPREMOM':        ('Elektronika',        'Links / HG Spot — 8% popust na tehničku robu'),
+    'TRGOVINA NA MALO TELEKOMUNIKACIJSKOM':        ('Elektronika',        'A1 / Telemach — posebna tarifa za HPB klijente'),
+
+    # Obrazovanje
+    'OBRAZOVANJE':                                ('Obrazovanje',        'Algebra / online tečajevi — 15% popust'),
+
+    # Pretplate i streaming
+    'EMITIRANJE TELEVIZIJSKOG PROGRAMA I VIDEO DISTRIBUCIJA': ('Streaming', 'Netflix / HBO Max — 2 mj. besplatno uz HPB karticu'),
+    'TELEKOMUNIKACIJE':                           ('Telekomunikacije',   'A1 / Telemach — posebna tarifa za HPB klijente'),
+}
+
+# Izračunaj top kategoriju potrošnje po klijentu (samo odlazni, zadnjih 12 mj.)
+t12_odlazni = transakcije[
+    (transakcije['DATUM'] >= REF_DATE - pd.Timedelta(days=365)) &
+    (transakcije['SMJER'] == 'D')   # D = debit = klijent plaća
+].copy()
+
+t12_odlazni['KAT'] = t12_odlazni['KATEGORIJA_DJELATNOSTI_DRUGE_STRANE'].astype(str).str.strip()
+
+# Top 3 kategorije po klijentu (po volumenu)
+spend_top = (t12_odlazni
+    .groupby(['IDENTIFIKATOR_KLIJENTA', 'KAT'])['IZNOS']
+    .sum()
+    .reset_index()
+    .sort_values(['IDENTIFIKATOR_KLIJENTA', 'IZNOS'], ascending=[True, False])
+)
+
+# Uzmi top 3 kategorije po klijentu
+spend_top3 = (spend_top
+    .groupby('IDENTIFIKATOR_KLIJENTA')
+    .head(3)
+    .copy()
+)
+
+# Mapiraj kategorije na partnere
+spend_top3['PARTNER_TIP']   = spend_top3['KAT'].map(
+    lambda k: PARTNER_MAPA.get(k, (None, None))[0])
+spend_top3['PARTNER_PONUDA'] = spend_top3['KAT'].map(
+    lambda k: PARTNER_MAPA.get(k, (None, None))[1])
+
+# Ostavi samo one s matchom
+spend_matched = spend_top3[spend_top3['PARTNER_TIP'].notna()].copy()
+
+# Po klijentu uzmi top 2 partner ponude (po volumenu potrošnje)
+partner_ponude = (spend_matched
+    .sort_values(['IDENTIFIKATOR_KLIJENTA', 'IZNOS'], ascending=[True, False])
+    .groupby('IDENTIFIKATOR_KLIJENTA')
+    .head(2)
+    [['IDENTIFIKATOR_KLIJENTA', 'KAT', 'IZNOS', 'PARTNER_TIP', 'PARTNER_PONUDA']]
+    .copy()
+)
+
+print(f"  Klijenata s partner ponudom:  {partner_ponude['IDENTIFIKATOR_KLIJENTA'].nunique():,}")
+print(f"  Ukupno partner preporuka:     {len(partner_ponude):,}")
+print(f"\n  Top partner kategorije:")
+print(partner_ponude['PARTNER_TIP'].value_counts().to_string())
+
+# ── Vizualizacija — gdje klijenti troše ──────────────────────────────────────
+fig_spend, ax_sp = plt.subplots(figsize=(14, 6))
+top_cats = (t12_odlazni.groupby('KAT')['IZNOS']
+            .sum()
+            .sort_values(ascending=False)
+            .head(15))
+top_cats_clean = top_cats.copy()
+top_cats_clean.index = top_cats_clean.index.str[:45]
+top_cats_clean.plot(kind='barh', ax=ax_sp, color='#1E88E5', edgecolor='white')
+ax_sp.set_title('Top 15 kategorija potrošnje — svi klijenti (zadnjih 12 mj.)',
+                fontweight='bold', fontsize=13)
+ax_sp.set_xlabel('Ukupni volumen (EUR)')
+ax_sp.invert_yaxis()
+plt.tight_layout()
+plt.show()
+
+# ════════════════════════════════════════════════════════════
+# NEXT BEST OFFER ENGINE
+# ════════════════════════════════════════════════════════════
+# Za svakog klijenta model generira do 3 personalne ponude
+# rangirane po: eligibilnost × sklonost prihvatu × zarada banke
+# Bankar vidi ponude + obrazloženje i sam odlučuje što prezentira
+# ════════════════════════════════════════════════════════════
+
+print("\n\n" + "═" * 70)
+print("  NEXT BEST OFFER ENGINE — Personalne ponude za bankara")
+print("═" * 70)
+
+# Spoji s klijentskim profilom koji ima sve što trebamo
+nbo_df = final.merge(
+    klijenti[['IDENTIFIKATOR_KLIJENTA', 'KREDITNI_RATING',
+              'VRSTA_STANOVANJA', 'BRACNI_STATUS']],
+    on='IDENTIFIKATOR_KLIJENTA', how='left'
+)
+
+def generiraj_ponude(row):
+    """
+    Segment-svjesni NBO engine.
+
+    SPASI PRIORITET / SPASI → intervencija bankara (osobni poziv/sastanak)
+    Svi ostali              → automatska nagrada putem aplikacije
+
+    Dobna ograničenja:
+      65+ / umirovljenik    → bez kredita, bez digitalnih ponuda
+    """
+    ponude = []
+
+    dob          = row.get('DOB', 40)
+    job_sc       = row.get('job_score', 10)
+    vol          = row.get('avg_monthly_vol', 0)
+    bal          = row.get('avg_balance_90d', 0)
+    has_kredit   = row.get('has_kredit', 0)
+    has_depozit  = row.get('has_depozit', 0)
+    tenure       = row.get('tenure_years', 0)
+    clv          = row.get('CLV_SCORE', 0)
+    segment      = row.get('SEGMENT', '')
+    vrsta_zaposl = str(row.get('VRSTA_ZAPOSLENJA', '')).upper()
+
+    je_umirovljenik = 'UMIROVLJENIK' in vrsta_zaposl or dob >= 60
+    je_mlad         = dob < 40
+
+    # ════════════════════════════════════════════════════════
+    # SPASI PRIORITET / SPASI — intervencija bankara
+    # Bankar odlučuje što će ponuditi, sustav samo označava klijenta
+    # ════════════════════════════════════════════════════════
+    if segment in ('SPASI PRIORITET', 'SPASI'):
+
+        ponude.append({
+            'PROIZVOD':     'Intervencija bankara — osobni poziv',
+            'RAZLOG':       f'Klijent {tenure:.0f} god. u HPB-u, CLV {clv:.0f} — '
+                            f'visoki churn rizik, potreban osobni kontakt',
+            'ZARADA_BANKE': 'Retencija visoko vrijednog klijenta',
+            'KANAL':        'Osobni poziv / sastanak u poslovnici',
+            'SCORE':        100,
+        })
+
+        if bal >= 2000 and has_depozit == 0:
+            ponude.append({
+                'PROIZVOD':     'Oročeni depozit — povlaštena kamata',
+                'RAZLOG':       f'Stanje {bal:,.0f}€ slobodnih sredstava — '
+                                f'konkretna financijska korist kao razlog ostanka',
+                'ZARADA_BANKE': 'Stabilizacija depozitne baze',
+                'KANAL':        'Osobni savjetnik',
+                'SCORE':        min(99, int(bal / 200 + tenure * 5)),
+            })
+
+        if has_kredit == 0 and not je_umirovljenik and vol >= 1500 and job_sc >= 12:
+            ponude.append({
+                'PROIZVOD':     'Kredit — ponuda po mjeri',
+                'RAZLOG':       f'Prihodi {vol:,.0f}€/mj., bez aktivnog kredita — '
+                                f'personalna kreditna ponuda kao retencijski alat',
+                'ZARADA_BANKE': 'Dugoročni kreditni prihod',
+                'KANAL':        'Osobni savjetnik',
+                'SCORE':        min(98, int(job_sc * 2 + vol / 150)),
+            })
+
+    # ════════════════════════════════════════════════════════
+    # INVESTIRAJ — automatska nagrada putem aplikacije
+    # ════════════════════════════════════════════════════════
+    elif segment == 'INVESTIRAJ':
+
+        ponude.append({
+            'PROIZVOD':     'Nagrada putem aplikacije — loyalty bodovi',
+            'RAZLOG':       f'Mlad klijent dob {dob}g. s potencijalom — '
+                            f'digitalna nagrada gradi naviku korištenja HPB appa',
+            'ZARADA_BANKE': 'Engagement | Dugoročni lock-in',
+            'KANAL':        'HPB mobilna aplikacija',
+            'SCORE':        80,
+        })
+
+        if has_kredit == 0 and not je_umirovljenik and dob <= 45 and vol >= 1500 and job_sc >= 12:
+            ponude.append({
+                'PROIZVOD':     'Stambeni kredit — first home',
+                'RAZLOG':       f'Dob {dob}g., prihodi {vol:,.0f}€/mj. — '
+                                f'pravo vrijeme za prvu nekretninu',
+                'ZARADA_BANKE': 'Kamate 20-30 god.',
+                'KANAL':        'Osobni savjetnik',
+                'SCORE':        min(79, int(job_sc * 2 + vol / 200)),
+            })
+
+    # ════════════════════════════════════════════════════════
+    # UPOZORI — automatska nagrada putem aplikacije
+    # ════════════════════════════════════════════════════════
+    elif segment == 'UPOZORI':
+
+        ponude.append({
+            'PROIZVOD':     'Nagrada putem aplikacije — cashback akcija',
+            'RAZLOG':       f'Signali odlaska — brza automatska nagrada '
+                            f'može zaustaviti trend bez angažmana bankara',
+            'ZARADA_BANKE': 'Niska investicija | Zadržavanje klijenta',
+            'KANAL':        'HPB mobilna aplikacija (push notifikacija)',
+            'SCORE':        75,
+        })
+
+        if has_kredit == 0 and vol >= 400 and not je_umirovljenik:
+            ponude.append({
+                'PROIZVOD':     'Gotovinski kredit — instant odobrenje',
+                'RAZLOG':       f'Prihodi {vol:,.0f}€/mj., bez kredita — '
+                                f'brza likvidnost do 10.000€',
+                'ZARADA_BANKE': 'Visoka kamatna stopa',
+                'KANAL':        'HPB mobilna aplikacija',
+                'SCORE':        min(74, int(tenure * 3 + vol / 60)),
+            })
+
+    # ════════════════════════════════════════════════════════
+    # RAZVIJAJ PREMIUM — automatska nagrada putem aplikacije
+    # ════════════════════════════════════════════════════════
+    elif segment == 'RAZVIJAJ PREMIUM':
+
+        ponude.append({
+            'PROIZVOD':     'Nagrada putem aplikacije — premium loyalty status',
+            'RAZLOG':       f'Stabilan i vrijedan klijent — dodjela premium '
+                            f'statusa u aplikaciji povećava vezanost',
+            'ZARADA_BANKE': 'Cross-sell temelj | Retencija',
+            'KANAL':        'HPB mobilna aplikacija',
+            'SCORE':        85,
+        })
+
+        if has_kredit == 0 and not je_umirovljenik and dob <= 55 and vol >= 1800 and job_sc >= 12:
+            ponude.append({
+                'PROIZVOD':     'Hipotekarni kredit',
+                'RAZLOG':       f'Stabilan klijent {tenure:.0f} god., prihodi {vol:,.0f}€/mj.',
+                'ZARADA_BANKE': 'Kamate 20-30 god.',
+                'KANAL':        'Osobni savjetnik',
+                'SCORE':        min(84, int(job_sc * 2 + vol / 150)),
+            })
+
+        if bal >= 2000 and has_depozit == 0:
+            ponude.append({
+                'PROIZVOD':     'Oročeni depozit — viša kamatna stopa',
+                'RAZLOG':       f'Slobodna sredstva {bal:,.0f}€',
+                'ZARADA_BANKE': 'Stabilizacija pasive',
+                'KANAL':        'HPB mobilna aplikacija',
+                'SCORE':        min(83, int(bal / 300 + tenure * 4)),
+            })
+
+    # ════════════════════════════════════════════════════════
+    # ODRŽAVAJ — loyalty nagrada putem aplikacije
+    # ════════════════════════════════════════════════════════
+    elif segment == 'ODRŽAVAJ':
+
+        ponude.append({
+            'PROIZVOD':     'Loyalty nagrada — zahvala za dugoročnu lojalnost',
+            'RAZLOG':       f'Klijent {tenure:.0f} god. u HPB-u — '
+                            f'personalizirana nagrada za vjernost',
+            'ZARADA_BANKE': 'Retencija | Smanjen churn',
+            'KANAL':        'HPB mobilna aplikacija',
+            'SCORE':        min(100, int(tenure * 6 + clv / 2)),
+        })
+
+        if bal >= 1500 and has_depozit == 0:
+            ponude.append({
+                'PROIZVOD':     'Oročeni depozit — posebna kamata za lojalne',
+                'RAZLOG':       f'Stanje {bal:,.0f}€ slobodnih sredstava',
+                'ZARADA_BANKE': 'Stabilizacija depozitne baze',
+                'KANAL':        'HPB mobilna aplikacija',
+                'SCORE':        min(99, int(bal / 250 + tenure * 3)),
+            })
+
+    # ════════════════════════════════════════════════════════
+    # RAZVIJAJ — automatska nagrada putem aplikacije
+    # ════════════════════════════════════════════════════════
+    elif segment == 'RAZVIJAJ':
+
+        ponude.append({
+            'PROIZVOD':     'Nagrada putem aplikacije — onboarding bonus',
+            'RAZLOG':       f'Klijent s potencijalom za rast — '
+                            f'digitalni onboarding bonus potiče dublje korištenje banke',
+            'ZARADA_BANKE': 'Engagement | Cross-sell temelj',
+            'KANAL':        'HPB mobilna aplikacija',
+            'SCORE':        70,
+        })
+
+        if has_kredit == 0 and not je_umirovljenik and vol >= 1200 and job_sc >= 10 and dob <= 55:
+            ponude.append({
+                'PROIZVOD':     'Nenamjenski kredit',
+                'RAZLOG':       f'Prihodi {vol:,.0f}€/mj., bez kredita',
+                'ZARADA_BANKE': 'Kamate 3-7 god.',
+                'KANAL':        'HPB mobilna aplikacija ili savjetnik',
+                'SCORE':        min(69, int(vol / 80 + job_sc * 2)),
+            })
+
+    # ════════════════════════════════════════════════════════
+    # PRATI — automatska nagrada putem aplikacije
+    # ════════════════════════════════════════════════════════
+    elif segment == 'PRATI':
+
+        if has_kredit == 0 and vol >= 400 and not je_umirovljenik:
+            ponude.append({
+                'PROIZVOD':     'Gotovinski kredit — automatski push',
+                'RAZLOG':       f'Prihodi {vol:,.0f}€/mj., bez kredita — '
+                                f'niska akvizicija, visoka kamatna marža',
+                'ZARADA_BANKE': 'Visoka kamatna stopa',
+                'KANAL':        'HPB mobilna aplikacija (automated)',
+                'SCORE':        min(100, int(vol / 50 + tenure * 2)),
+            })
+
+    ponude.sort(key=lambda x: x['SCORE'], reverse=True)
+    return ponude[:3]
+
+
+# ════════════════════════════════════════════════════════════
+# PARTNER KATALOG — life-stage segmenti + premium tier
+# Partner ponude su za APP layer — bankar ne odlučuje o njima,
+# šalju se automatski ovisno o profilu klijenta (vezan uz Zadatak 2).
+# ════════════════════════════════════════════════════════════
+
+# Life-stage katalozi — prilagođeni životnom stadiju, ne samo potrošnji
+_PP_MLADI = [  # < 30 godina
+    ('Digital lifestyle', 'Wolt — 15% popust na dostavu svaki tjedan kroz HPB app'),
+    ('Sport & Fitness',   'MultiSport — 25% popust na godišnju pretplatu'),
+    ('Streaming',         'Netflix / Disney+ — 3 mj. besplatno uz HPB karticu'),
+    ('Događaji',          'Entrio — 10% popust na ulaznice za koncerte i festivale'),
+    ('Mobilne usluge',    'Telemach / A1 — posebna tarifa do 30 god. za HPB klijente'),
+]
+
+_PP_MLADA_OBITELJ = [  # 28–45, u braku / partner
+    ('Supermarketi',      'Konzum / Spar — 8% cashback na tjedno pakiranje namirnica'),
+    ('Ljekarne',          'Bipa / dm — 12% popust na farmaceutske i baby proizvode'),
+    ('Dom & Namještaj',   'IKEA — 6% cashback na kupovinu uz HPB karticu'),
+    ('Dječje aktivnosti', 'Decathlon — 10% popust na dječju sportsku opremu'),
+    ('Hrana & Dostava',   'Bolt Food — 10% cashback za obitelji vikendom'),
+]
+
+_PP_SREDNJA_DOB = [  # 40–55
+    ('Gorivo & Auto',     'INA kartica — 0,12€/l popust + besplatno pranje auta'),
+    ('Putovanja',         'Uniline / Valamar — extra 10% popust na ljetovanje'),
+    ('Zdravlje',          'Medikol / Bagatin — 15% na preventivne zdravstvene preglede'),
+    ('Restoran',          'HPB Gastro partner — 20% popust u odabranim restoranima'),
+    ('Elektronika',       'Links / HG Spot — 8% popust na tehničku robu'),
+]
+
+_PP_AKTIVAN_50 = [  # 50–64
+    ('Putovanja',         'Kompas / Uniline — 12% popust na grupna putovanja i krstarenja'),
+    ('Zdravlje',          'dm / Bipa — 15% na dermokozmetiku i suplemente'),
+    ('Restoran',          'HPB Gastro partner — 15% u odabranim restoranima'),
+    ('Gorivo',            'INA kartica — 0,10€/l popust na gorivo'),
+    ('Dom & Uređenje',    'Bauhaus / Ikea — 8% cashback na uređenje doma'),
+]
+
+_PP_PREMIUM = [  # SPASI PRIORITET / SPASI + CLV visoki — premium lifestyle
+    ('Premium putovanja',   'Adriatic Luxury Hotels — 15% na luxury resort u Dubrovniku / Splitu'),
+    ('Premium restoran',    'Restaurant 360° Dubrovnik / Noel Zagreb — 20% popust uz HPB Platinum'),
+    ('Premium zdravlje',    'Poliklinika Magdalena / Medico — 20% na health check-up paket'),
+    ('Premium avionske',    'Croatia Airlines — besplatna nadogradnja u Business Class uz HPB Premium'),
+    ('Premium sport & relax','Golf klub Zagreb / spa resort — 3 mj. gost-članstvo gratis'),
+]
+
+_PP_LOYALTY = [  # ODRŽAVAJ / RAZVIJAJ PREMIUM — dugoročni lojalni klijenti
+    ('Loyalty cashback',    'HPB Loyalty — 1,5% cashback na sve kartične transakcije ovaj kvartal'),
+    ('Premium supermarket', 'Spar Premium / Tommy — 10% cashback na organske i premium linije'),
+    ('Putovanja loyalty',   'Amadria Park / Plava laguna — rani booking extra 12% popust'),
+    ('Zdravlje loyalty',    'Poliklinika Sunce — 15% na preventivne preglede za lojalne klijente'),
+    ('Auto loyalty',        'Autonet partner — 12% na redovni servis vozila'),
+]
+
+
+def dodaj_partner_ponude(klijent_id, dob, segment,
+                         vrsta_zaposl='', bracni_status='', clv_score=0):
+    """
+    Partner ponude = automatski sloj za HPB app (ne odlučuje bankar).
+
+    Kombinira:
+      1. Life-stage ponude (dob + obiteljski status)
+      2. Spend-based ponude (iz stvarnih transakcija klijenta)
+
+    Segmentna pravila:
+      60+ / umirovljenici     → bez partner ponuda
+      UPOZORI / PRATI         → bez partner ponuda (niska investicija)
+      SPASI PRIORITET / SPASI → premium lifestyle partneri
+      ODRŽAVAJ / RAZVIJAJ PREMIUM → loyalty + obiteljski orientirani
+      INVESTIRAJ / RAZVIJAJ   → digitalni lifestyle
+
+    Vraća do 4 ponude za app notifikacije.
+    """
+    je_umirovljenik = 'UMIROVLJENIK' in str(vrsta_zaposl).upper() or dob >= 60
+
+    if je_umirovljenik:
+        return []
+
+    if segment in ('UPOZORI', 'PRATI'):
+        return []
+
+    # ── Odredi life-stage katalog ────────────────────────────────────
+    je_obitelj = any(x in str(bracni_status).upper()
+                     for x in ['ŽENJEN', 'UDANA', 'BRAKU', 'VANBRAČNA'])
+
+    if segment in ('SPASI PRIORITET', 'SPASI') and clv_score >= 50:
+        lifecat = _PP_PREMIUM
+    elif segment in ('ODRŽAVAJ', 'RAZVIJAJ PREMIUM'):
+        lifecat = _PP_LOYALTY
+    elif dob < 30:
+        lifecat = _PP_MLADI
+    elif dob < 47 and je_obitelj:
+        lifecat = _PP_MLADA_OBITELJ
+    elif dob < 56:
+        lifecat = _PP_SREDNJA_DOB
+    else:
+        lifecat = _PP_AKTIVAN_50
+
+    rezultat = []
+    for tip, ponuda in lifecat[:2]:
+        rezultat.append({
+            'PARTNER_TIP':   tip,
+            'PONUDA':        ponuda,
+            'POTROSNJA_GOD': 0,
+            'KATEGORIJA':    'Life-stage preporuka',
+            'IZVOR':         'LIFECYCLE',
+        })
+
+    klijent_spend = partner_ponude[
+        partner_ponude['IDENTIFIKATOR_KLIJENTA'] == klijent_id
+    ]
+    for _, spend_row in klijent_spend.iterrows():
+        if spend_row['PARTNER_TIP'] not in [r['PARTNER_TIP'] for r in rezultat]:
+            rezultat.append({
+                'PARTNER_TIP':   spend_row['PARTNER_TIP'],
+                'PONUDA':        spend_row['PARTNER_PONUDA'],
+                'POTROSNJA_GOD': round(spend_row['IZNOS'], 0),
+                'KATEGORIJA':    spend_row['KAT'][:50],
+                'IZVOR':         'SPEND',
+            })
+
+    return rezultat[:4]
+
+
+# Generiraj ponude za SVE klijente (uključujući PRATI — dobivaju gotovinski kredit)
+aktivni = nbo_df.copy()
+aktivni['PONUDE']      = aktivni.apply(generiraj_ponude, axis=1)
+aktivni['PARTNER_PONUDE'] = aktivni.apply(
+    lambda r: dodaj_partner_ponude(
+        r['IDENTIFIKATOR_KLIJENTA'],
+        r['DOB'],
+        r['SEGMENT'],
+        r.get('VRSTA_ZAPOSLENJA', ''),
+        r.get('BRACNI_STATUS', ''),
+        r.get('CLV_SCORE', 0),
+    ), axis=1)
+aktivni['BROJ_PONUDA']  = aktivni['PONUDE'].apply(len)
+aktivni['BROJ_PARTNER'] = aktivni['PARTNER_PONUDE'].apply(len)
+
+print(f"\n  Klijenata s barem 1 bankarskim proizvodom: "
+      f"{(aktivni['BROJ_PONUDA'] > 0).sum():,} / {len(aktivni):,}")
+print(f"  Klijenata s barem 1 partner ponudom:     "
+      f"{(aktivni['BROJ_PARTNER'] > 0).sum():,} / {len(aktivni):,}")
+print(f"  Prosječan broj bankarskih ponuda: {aktivni['BROJ_PONUDA'].mean():.1f}")
+print(f"  Prosječan broj partner ponuda:    {aktivni['BROJ_PARTNER'].mean():.1f}")
+
+# Distribucija bankarskih ponuda
+print(f"\n  Distribucija bankarskih proizvoda (bankar odlučuje):")
+from collections import Counter
+sve_ponude = [p['PROIZVOD'] for ponude in aktivni['PONUDE'] for p in ponude]
+for proizvod, cnt in Counter(sve_ponude).most_common():
+    print(f"    {proizvod:<35} {cnt:>6} preporuka")
+
+# Distribucija partner ponuda
+print(f"\n  Distribucija partner ponuda (automatski kroz app):")
+sve_pp = [p['PARTNER_TIP'] for pp_lista in aktivni['PARTNER_PONUDE'] for p in pp_lista]
+for tip, cnt in Counter(sve_pp).most_common():
+    print(f"    {tip:<35} {cnt:>6} preporuka")
+
+# ── BANKAROV BRIEF — ispis top 10 klijenata ─────────────────────────────────
+print("\n\n" + "═" * 70)
+print("  BANKAROV BRIEF — Top 10 klijenata za akciju ovaj tjedan")
+print("═" * 70)
+
+top_brief = aktivni[aktivni['BROJ_PONUDA'] > 0].nlargest(12, 'PRIORITY_SCORE')
+
+for _, row in top_brief.iterrows():
+    print(f"\n{'─'*70}")
+    print(f"  👤  {row['IDENTIFIKATOR_KLIJENTA']}  |  "
+          f"Dob: {int(row['DOB'])}  |  {row['VRSTA_ZAPOSLENJA']}  |  "
+          f"Segment: {row['SEGMENT']}")
+    print(f"  📊  CLV: {row['CLV_SCORE']:.0f}  |  "
+          f"Churn Risk: {row['CHURN_RISK']:.0f}  |  "
+          f"Potential: {row['FUTURE_POTENTIAL']:.0f}  |  "
+          f"Priority: {row['PRIORITY_SCORE']:.0f}")
+    print(f"  💡  Preporučena akcija: {row['PREPORUCENA_AKCIJA']}")
+
+    if row['PONUDE']:
+        print(f"  🏦  Bankarski proizvodi (bankar odlučuje):")
+        for i, p in enumerate(row['PONUDE'], 1):
+            print(f"      {i}. {p['PROIZVOD']}")
+            print(f"         Zašto: {p['RAZLOG']}")
+            print(f"         Zarada banke: {p['ZARADA_BANKE']}")
+            print(f"         Kanal: {p['KANAL']}")
+
+    if row['PARTNER_PONUDE']:
+        print(f"  📱  Partner ponude (automatski kroz HPB app):")
+        for pp in row['PARTNER_PONUDE']:
+            izvor = pp.get('IZVOR', '')
+            if izvor == 'SPEND' and pp['POTROSNJA_GOD'] > 0:
+                kontekst = f"godišnja potrošnja {pp['POTROSNJA_GOD']:,.0f}€ u kategoriji"
+            else:
+                kontekst = f"life-stage preporuka za dob {int(row['DOB'])}g."
+            print(f"      • [{pp['PARTNER_TIP']}]  {pp['PONUDA']}")
+            print(f"        Kontekst: {kontekst}")
+
+# Export NBO u CSV za bankare
+nbo_export = []
+for _, row in aktivni[aktivni['BROJ_PONUDA'] > 0].iterrows():
+    for i, p in enumerate(row['PONUDE'], 1):
+        nbo_export.append({
+            'IDENTIFIKATOR_KLIJENTA': row['IDENTIFIKATOR_KLIJENTA'],
+            'DOB':           row['DOB'],
+            'VRSTA_ZAPOSLENJA': row['VRSTA_ZAPOSLENJA'],
+            'SEGMENT':       row['SEGMENT'],
+            'PRIORITY_SCORE': round(row['PRIORITY_SCORE'], 1),
+            'CLV_SCORE':     round(row['CLV_SCORE'], 1),
+            'CHURN_RISK':    round(row['CHURN_RISK'], 1),
+            'FUTURE_POTENTIAL': round(row['FUTURE_POTENTIAL'], 1),
+            'RANG_PONUDE':   i,
+            'PROIZVOD':      p['PROIZVOD'],
+            'RAZLOG':        p['RAZLOG'],
+            'ZARADA_BANKE':  p['ZARADA_BANKE'],
+            'KANAL':         p['KANAL'],
+            'PONUDA_SCORE':  p['SCORE'],
+        })
+
+nbo_df_out = pd.DataFrame(nbo_export).sort_values(
+    ['PRIORITY_SCORE', 'RANG_PONUDE'], ascending=[False, True])
+
+out_nbo = DATA_PATH.replace('OneDrive_2026-04-16\\', '') + 'nbo_ponude.csv'
+nbo_df_out.to_csv(out_nbo, index=False, encoding='utf-8-sig')
+print(f"\n\n  ✓ NBO bankarski proizvodi: nbo_ponude.csv  ({len(nbo_df_out):,} redaka)")
+
+# Export partner ponuda (app layer)
+partner_export = []
+for _, row in aktivni[aktivni['BROJ_PARTNER'] > 0].iterrows():
+    for i, pp in enumerate(row['PARTNER_PONUDE'], 1):
+        partner_export.append({
+            'IDENTIFIKATOR_KLIJENTA': row['IDENTIFIKATOR_KLIJENTA'],
+            'DOB':             row['DOB'],
+            'VRSTA_ZAPOSLENJA': row['VRSTA_ZAPOSLENJA'],
+            'SEGMENT':         row['SEGMENT'],
+            'PRIORITY_SCORE':  round(row['PRIORITY_SCORE'], 1),
+            'CLV_SCORE':       round(row['CLV_SCORE'], 1),
+            'CHURN_RISK':      round(row['CHURN_RISK'], 1),
+            'RANG_PONUDE':     i,
+            'PARTNER_TIP':     pp['PARTNER_TIP'],
+            'PONUDA':          pp['PONUDA'],
+            'IZVOR':           pp.get('IZVOR', ''),
+            'POTROSNJA_GOD':   pp.get('POTROSNJA_GOD', 0),
+            'KATEGORIJA':      pp.get('KATEGORIJA', ''),
+        })
+
+pp_df_out = pd.DataFrame(partner_export).sort_values(
+    ['PRIORITY_SCORE', 'RANG_PONUDE'], ascending=[False, True])
+
+out_pp = DATA_PATH.replace('OneDrive_2026-04-16\\', '') + 'partner_ponude_app.csv'
+pp_df_out.to_csv(out_pp, index=False, encoding='utf-8-sig')
+print(f"  ✓ Partner ponude (app): partner_ponude_app.csv  ({len(pp_df_out):,} redaka)")
+print("=" * 70)
+
+
+# ════════════════════════════════════════════════════════════
+# REAKCIJE SUSTAVA — osoba iz svake klase + što sustav nudi
+# ════════════════════════════════════════════════════════════
+
+def _odaberi_iz_segmenta(segment):
+    sub = final[final['SEGMENT'] == segment].copy()
+    if len(sub) == 0:
+        return None
+    # Kartice prikazuju samo klijente s realnom dobi (18-59)
+    sub_mladi = sub[(sub['DOB'] >= 18) & (sub['DOB'] < 60)]
+    if len(sub_mladi) > 0:
+        sub = sub_mladi
+    # Nijedan score ne smije biti nula na kartici
+    sub_nonzero = sub[(sub['CLV_SCORE'] > 0) & (sub['CHURN_RISK'] > 0) & (sub['FUTURE_POTENTIAL'] > 0)]
+    if len(sub_nonzero) > 0:
+        sub = sub_nonzero
+    if segment in ('SPASI PRIORITET', 'SPASI'):
+        # Traži klijenta s visokim CLV I visokim Churn I visokim Potential — idealan primjer
+        cand = sub[
+            (sub['CLV_SCORE'] >= sub['CLV_SCORE'].quantile(0.60)) &
+            (sub['CHURN_RISK'] >= sub['CHURN_RISK'].quantile(0.60)) &
+            (sub['FUTURE_POTENTIAL'] >= sub['FUTURE_POTENTIAL'].quantile(0.40))
+        ]
+        if len(cand) == 0:
+            cand = sub
+        return cand.nlargest(1, 'PRIORITY_SCORE').iloc[0]
+    elif segment == 'INVESTIRAJ':
+        cand = sub[sub['DOB'] <= 35] if (sub['DOB'] <= 35).sum() >= 3 else sub
+        return cand.nlargest(1, 'FUTURE_POTENTIAL').iloc[0]
+    elif segment == 'UPOZORI':
+        return sub.nlargest(1, 'CHURN_RISK').iloc[0]
+    elif segment == 'RAZVIJAJ PREMIUM':
+        sub['x'] = sub['CLV_SCORE'] * 0.4 + sub['FUTURE_POTENTIAL'] * 0.6
+        return sub.nlargest(1, 'x').iloc[0]
+    elif segment == 'ODRŽAVAJ':
+        # Lojalan i vrijedan klijent — zaposlen, visok CLV, mlađi od 50
+        nije_umir = ~sub['VRSTA_ZAPOSLENJA'].astype(str).str.upper().str.contains('UMIR', na=False)
+        cand = sub[nije_umir & (sub['DOB'] < 50) & (sub['CLV_SCORE'] >= sub['CLV_SCORE'].quantile(0.50))]
+        if len(cand) == 0:
+            cand = sub[nije_umir & (sub['DOB'] < 50)]
+        if len(cand) == 0:
+            cand = sub[nije_umir]
+        if len(cand) == 0:
+            cand = sub
+        return cand.nlargest(1, 'CLV_SCORE').iloc[0]
+    elif segment == 'RAZVIJAJ':
+        cand = sub[sub['DOB'] <= 35] if (sub['DOB'] <= 35).sum() >= 3 else sub
+        return cand.nlargest(1, 'FUTURE_POTENTIAL').iloc[0]
+    elif segment == 'PRATI':
+        # Sva tri scora niska — tipični "low engagement" klijent
+        cand = sub[
+            (sub['CLV_SCORE']       <= sub['CLV_SCORE'].quantile(0.40)) &
+            (sub['CHURN_RISK']      <= sub['CHURN_RISK'].quantile(0.40)) &
+            (sub['FUTURE_POTENTIAL'] <= sub['FUTURE_POTENTIAL'].quantile(0.40))
+        ]
+        if len(cand) == 0:
+            cand = sub
+        return cand.nsmallest(1, 'PRIORITY_SCORE').iloc[0]
+    else:  # fallback
+        idx = (sub['PRIORITY_SCORE'] - sub['PRIORITY_SCORE'].median()).abs().idxmin()
+        return sub.loc[idx]
+
+# Prikupi jednu osobu po segmentu
+_karte = {}
+for seg in SEG_ORDER:
+    rep = _odaberi_iz_segmenta(seg)
+    if rep is None:
+        continue
+    kid = rep['IDENTIFIKATOR_KLIJENTA']
+    nbo_r = aktivni[aktivni['IDENTIFIKATOR_KLIJENTA'] == kid]
+    banking = nbo_r.iloc[0]['PONUDE']        if len(nbo_r) > 0 else []
+    partner = nbo_r.iloc[0]['PARTNER_PONUDE'] if len(nbo_r) > 0 else []
+    kl_extra = klijenti[klijenti['IDENTIFIKATOR_KLIJENTA'] == kid]
+    zanimanje = str(kl_extra.iloc[0].get('ZANIMANJE', '')) if len(kl_extra) > 0 else ''
+    bracni    = str(kl_extra.iloc[0].get('BRACNI_STATUS', '')) if len(kl_extra) > 0 else ''
+    _karte[seg] = dict(rep=rep, banking=banking, partner=partner,
+                       zanimanje=zanimanje, bracni=bracni)
+
+# ── Vizualne kartice — 4 × 2 grid ────────────────────────────────────────────
+_EMOJI = {
+    'SPASI PRIORITET': '🚨', 'SPASI': '📞', 'INVESTIRAJ': '📱',
+    'UPOZORI': '⚠️', 'RAZVIJAJ PREMIUM': '💼', 'ODRŽAVAJ': '🎁',
+    'RAZVIJAJ': '📈', 'PRATI': '👁️',
+}
+
+def _crtaj_karticu(ax, seg, d):
+    rep   = d['rep']
+    color = SEG_COLORS[seg]
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis('off')
+
+    # Okvir
+    ax.add_patch(plt.Rectangle((0.01, 0.01), 0.98, 0.98,
+                                linewidth=3, edgecolor=color,
+                                facecolor='white', zorder=0))
+    # Header
+    ax.add_patch(plt.Rectangle((0.01, 0.82), 0.98, 0.17,
+                                facecolor=color, zorder=1))
+    ax.text(0.5, 0.905, f"{_EMOJI.get(seg, '')}  {seg}",
+            ha='center', va='center', fontsize=24, fontweight='bold',
+            color='white', zorder=2)
+
+    # OSOBA
+    ax.text(0.05, 0.77, '👤  OSOBA', fontsize=17, fontweight='bold',
+            color='#333', zorder=2)
+
+    zap = str(rep['VRSTA_ZAPOSLENJA']).title()
+    zan = d['zanimanje'] if d['zanimanje'] not in ('', 'nan', 'None') else ''
+    zap_zan = zap + (f'  —  {zan}' if zan else '')
+    if len(zap_zan) > 32:
+        zap_zan = zap_zan[:30] + '…'
+
+    profil_linije = [
+        f"Dob: {int(rep['DOB'])} god.   |   HPB klijent: {rep['tenure_years']:.0f} god.",
+        f"Zaposlenje: {zap_zan}",
+        f"Prima plaću u HPB: {'DA' if rep['prima_placu'] else 'NE'}   |   "
+        f"Aktivnih proizvoda: {int(rep['aktivnih_proizvoda'])}",
+    ]
+    for li, linija in enumerate(profil_linije):
+        ax.text(0.05, 0.71 - li * 0.062, linija,
+                fontsize=15, color='#444', zorder=2)
+
+    # SCOREVI
+    y_score_top = 0.71 - 3 * 0.062 - 0.025
+    ax.text(0.05, y_score_top, '📊  SCOREVI', fontsize=17, fontweight='bold',
+            color='#333', zorder=2)
+
+    for si, (lbl, val, bc) in enumerate([
+        ('CLV',       rep['CLV_SCORE'],        '#1E88E5'),
+        ('Churn',     rep['CHURN_RISK'],        '#E53935'),
+        ('Potential', rep['FUTURE_POTENTIAL'],  '#43A047'),
+    ]):
+        yb = y_score_top - 0.062 - si * 0.058
+        ax.barh(yb, 0.55, height=0.040, left=0.35,
+                color='#E0E0E0', zorder=1)
+        ax.barh(yb, 0.55 * val / 100, height=0.040, left=0.35,
+                color=bc, alpha=0.85, zorder=2)
+        ax.text(0.33, yb, lbl, va='center', ha='right',
+                fontsize=15, color='#555', zorder=3)
+        ax.text(0.915, yb, f'{val:.0f}', va='center',
+                fontsize=15, color='#333', zorder=3)
+
+    y_reakcija = y_score_top - 0.062 - 3 * 0.058 - 0.03
+
+    # REAKCIJA SUSTAVA — labela, ispod nje akcija
+    ax.text(0.05, y_reakcija, '⚡  REAKCIJA SUSTAVA',
+            fontsize=17, fontweight='bold', color=color, zorder=2)
+
+    akcija = AKCIJE.get(seg, '')
+    akcija_tekst = akcija.split('  ', 1)[-1] if '  ' in akcija else akcija
+    ax.text(0.05, y_reakcija - 0.065, akcija_tekst,
+            fontsize=16, fontweight='bold', color=color, zorder=2)
+
+    # Priority badge — manji krug, unutar kartice
+    ax.add_patch(plt.Circle((0.87, 0.10), 0.07, color=color, zorder=2))
+    ax.text(0.87, 0.10, f"{rep['PRIORITY_SCORE']:.0f}",
+            ha='center', va='center', fontsize=15, fontweight='bold',
+            color='white', zorder=3)
+    ax.text(0.87, 0.03, 'Priority', ha='center', va='bottom',
+            fontsize=12, color='#888', zorder=3)
+
+
+for seg in SEG_ORDER:
+    if seg not in _karte:
+        continue
+    fig_k, ax_k = plt.subplots(1, 1, figsize=(12, 9))
+    fig_k.patch.set_facecolor('#F5F5F5')
+    _crtaj_karticu(ax_k, seg, _karte[seg])
+    plt.tight_layout()
+    plt.show()
+
+
+# ════════════════════════════════════════════════════════════
+# KARTICA — OSOBA NAJBLIŽA ZADANIM SCOROVIMA
+# ════════════════════════════════════════════════════════════
+
+_target = dict(CHURN_RISK=47, CLV_SCORE=11, FUTURE_POTENTIAL=25)
+_dist = (
+    (final['CHURN_RISK']      - _target['CHURN_RISK']).abs() +
+    (final['CLV_SCORE']       - _target['CLV_SCORE']).abs() +
+    (final['FUTURE_POTENTIAL']- _target['FUTURE_POTENTIAL']).abs()
+)
+_match = final.loc[_dist.idxmin()]
+_match_kid = _match['IDENTIFIKATOR_KLIJENTA']
+_match_seg = _match['SEGMENT']
+
+_nbo_r   = aktivni[aktivni['IDENTIFIKATOR_KLIJENTA'] == _match_kid]
+_banking = _nbo_r.iloc[0]['PONUDE']        if len(_nbo_r) > 0 else []
+_partner = _nbo_r.iloc[0]['PARTNER_PONUDE'] if len(_nbo_r) > 0 else []
+_kl_ex   = klijenti[klijenti['IDENTIFIKATOR_KLIJENTA'] == _match_kid]
+_zan     = str(_kl_ex.iloc[0].get('ZANIMANJE',    '')) if len(_kl_ex) > 0 else ''
+_bra     = str(_kl_ex.iloc[0].get('BRACNI_STATUS','')) if len(_kl_ex) > 0 else ''
+
+print(f"Najbliža osoba: {_match_kid}  |  Segment: {_match_seg}")
+print(f"  CLV={_match['CLV_SCORE']:.0f}  Churn={_match['CHURN_RISK']:.0f}  Potential={_match['FUTURE_POTENTIAL']:.0f}")
+
+fig_m, ax_m = plt.subplots(1, 1, figsize=(12, 9))
+fig_m.patch.set_facecolor('#F5F5F5')
+_crtaj_karticu(ax_m, _match_seg,
+               dict(rep=_match, banking=_banking, partner=_partner,
+                    zanimanje=_zan, bracni=_bra))
+plt.tight_layout()
+plt.show()
 
 
 # ════════════════════════════════════════════════════════════
@@ -868,19 +1611,15 @@ print("─" * 80)
 churn_faktori = top20[[
     'IDENTIFIKATOR_KLIJENTA', 'SEGMENT', 'CHURN_RISK',
     'freq_drop', 'days_since_txn', 'bal_drop',
-    'vol_drop', 'prigovori_6m', 'digital_ratio',
-    'app_logins_30d', 'push_open_rate', 'ima_kredit'
+    'vol_drop', 'prigovori_6m', 'ima_kredit'
 ]].copy()
-churn_faktori['freq_drop']   = (churn_faktori['freq_drop']   * 100).round(0).astype(int).astype(str) + '%'
-churn_faktori['bal_drop']    = (churn_faktori['bal_drop']    * 100).round(0).astype(int).astype(str) + '%'
-churn_faktori['vol_drop']    = (churn_faktori['vol_drop']    * 100).round(0).astype(int).astype(str) + '%'
-churn_faktori['digital_ratio'] = (churn_faktori['digital_ratio'] * 100).round(0).astype(int).astype(str) + '%'
-churn_faktori['push_open_rate'] = (churn_faktori['push_open_rate'] * 100).round(0).astype(int).astype(str) + '%'
+churn_faktori['freq_drop'] = (churn_faktori['freq_drop'] * 100).round(0).astype(int).astype(str) + '%'
+churn_faktori['bal_drop']  = (churn_faktori['bal_drop']  * 100).round(0).astype(int).astype(str) + '%'
+churn_faktori['vol_drop']  = (churn_faktori['vol_drop']  * 100).round(0).astype(int).astype(str) + '%'
 churn_faktori.columns = [
     'Klijent', 'Segment', 'Churn Risk',
     'Pad txn freq', 'Dana bez txn', 'Pad stanja',
-    'Pad volumena', 'Prigovori 6mj', 'Digital %',
-    'App logins/mj', 'Push open %', 'Ima kredit'
+    'Pad volumena', 'Prigovori 6mj', 'Ima kredit'
 ]
 churn_faktori['Klijent'] = churn_faktori['Klijent'].str[:12]
 print(churn_faktori.to_string(index=False))
